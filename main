@@ -1,0 +1,186 @@
+DROP DATABASE IF EXISTS library_db;
+CREATE DATABASE library_db;
+USE library_db;
+
+-- ---------- TABLES ----------
+CREATE TABLE authors (
+  author_id   INT AUTO_INCREMENT PRIMARY KEY,
+  name        VARCHAR(100) NOT NULL,
+  bio         TEXT
+);
+
+CREATE TABLE publishers (
+  publisher_id INT AUTO_INCREMENT PRIMARY KEY,
+  name         VARCHAR(150) NOT NULL,
+  address      VARCHAR(255),
+  phone        VARCHAR(20),
+  email        VARCHAR(100)
+);
+
+CREATE TABLE categories (
+  category_id INT AUTO_INCREMENT PRIMARY KEY,
+  name        VARCHAR(80) NOT NULL UNIQUE,
+  description TEXT
+);
+
+CREATE TABLE books (
+  book_id          INT AUTO_INCREMENT PRIMARY KEY,
+  isbn             VARCHAR(20) NOT NULL UNIQUE,
+  title            VARCHAR(200) NOT NULL,
+  publisher_id     INT,
+  category_id      INT,
+  publish_year     YEAR,
+  total_copies     INT NOT NULL DEFAULT 1,
+  available_copies INT NOT NULL DEFAULT 1,
+  shelf_location   VARCHAR(20),
+  CONSTRAINT fk_books_pub FOREIGN KEY (publisher_id) REFERENCES publishers(publisher_id) ON DELETE SET NULL,
+  CONSTRAINT fk_books_cat FOREIGN KEY (category_id) REFERENCES categories(category_id) ON DELETE SET NULL,
+  CONSTRAINT chk_copies CHECK (available_copies >= 0 AND available_copies <= total_copies)
+);
+
+CREATE TABLE book_authors (
+  book_id   INT,
+  author_id INT,
+  PRIMARY KEY (book_id, author_id),
+  FOREIGN KEY (book_id)   REFERENCES books(book_id)   ON DELETE CASCADE,
+  FOREIGN KEY (author_id) REFERENCES authors(author_id) ON DELETE CASCADE
+);
+
+CREATE TABLE patrons (
+  patron_id       INT AUTO_INCREMENT PRIMARY KEY,
+  first_name      VARCHAR(50) NOT NULL,
+  last_name       VARCHAR(50) NOT NULL,
+  email           VARCHAR(100) NOT NULL UNIQUE,
+  phone           VARCHAR(20),
+  address         VARCHAR(255),
+  membership_date DATE NOT NULL DEFAULT (CURRENT_DATE),
+  status          ENUM('ACTIVE','SUSPENDED','EXPIRED') DEFAULT 'ACTIVE'
+);
+
+CREATE TABLE loans (
+  loan_id     INT AUTO_INCREMENT PRIMARY KEY,
+  book_id     INT NOT NULL,
+  patron_id   INT NOT NULL,
+  loan_date   DATE NOT NULL DEFAULT (CURRENT_DATE),
+  due_date    DATE NOT NULL,
+  return_date DATE,
+  status      ENUM('BORROWED','RETURNED','OVERDUE') DEFAULT 'BORROWED',
+  FOREIGN KEY (book_id)   REFERENCES books(book_id),
+  FOREIGN KEY (patron_id) REFERENCES patrons(patron_id),
+  INDEX idx_loans_patron (patron_id),
+  INDEX idx_loans_status (status)
+);
+
+CREATE TABLE fines (
+  fine_id   INT AUTO_INCREMENT PRIMARY KEY,
+  loan_id   INT NOT NULL UNIQUE,
+  amount    DECIMAL(8,2) NOT NULL DEFAULT 0,
+  paid      BOOLEAN DEFAULT FALSE,
+  paid_date DATE,
+  FOREIGN KEY (loan_id) REFERENCES loans(loan_id) ON DELETE CASCADE
+);
+
+-- ---------- TRIGGERS ----------
+DELIMITER $$
+CREATE TRIGGER trg_loan_after_insert
+AFTER INSERT ON loans
+FOR EACH ROW
+BEGIN
+  UPDATE books SET available_copies = available_copies - 1
+  WHERE book_id = NEW.book_id;
+END$$
+
+CREATE TRIGGER trg_loan_before_update
+BEFORE UPDATE ON loans
+FOR EACH ROW
+BEGIN
+  IF NEW.return_date IS NOT NULL AND OLD.return_date IS NULL THEN
+    SET NEW.status = 'RETURNED';
+  END IF;
+END$$
+
+CREATE TRIGGER trg_loan_after_update
+AFTER UPDATE ON loans
+FOR EACH ROW
+BEGIN
+  IF NEW.return_date IS NOT NULL AND OLD.return_date IS NULL THEN
+    UPDATE books SET available_copies = available_copies + 1
+    WHERE book_id = NEW.book_id;
+
+    IF NEW.return_date > NEW.due_date THEN
+      INSERT INTO fines(loan_id, amount)
+      VALUES (NEW.loan_id, DATEDIFF(NEW.return_date, NEW.due_date) * 1.00);
+    END IF;
+  END IF;
+END$$
+DELIMITER ;
+
+-- ---------- VIEWS ----------
+CREATE VIEW v_available_books AS
+SELECT b.book_id, b.title, b.isbn, c.name AS category,
+       GROUP_CONCAT(a.name SEPARATOR ', ') AS authors,
+       b.available_copies
+FROM books b
+LEFT JOIN categories c ON b.category_id = c.category_id
+LEFT JOIN book_authors ba ON b.book_id = ba.book_id
+LEFT JOIN authors a ON ba.author_id = a.author_id
+WHERE b.available_copies > 0
+GROUP BY b.book_id, b.title, b.isbn, c.name, b.available_copies;
+
+CREATE VIEW v_overdue_loans AS
+SELECT l.loan_id, p.first_name, p.last_name, b.title,
+       l.due_date, DATEDIFF(CURDATE(), l.due_date) AS days_overdue
+FROM loans l
+JOIN patrons p ON l.patron_id = p.patron_id
+JOIN books   b ON l.book_id   = b.book_id
+WHERE l.return_date IS NULL AND l.due_date < CURDATE();
+
+-- ---------- SAMPLE DATA ----------
+INSERT INTO authors (name) VALUES
+('Ramesh Kumar'), ('Anita Desai'), ('Robert Martin'), ('Jane Austen');
+
+INSERT INTO publishers (name, phone) VALUES
+('TechPress', '010-1111'), ('Oxford House', '010-2222'), ('Pearson', '010-3333');
+
+INSERT INTO categories (name) VALUES
+('Programming'), ('Fiction'), ('History'), ('Science');
+
+INSERT INTO books (isbn, title, publisher_id, category_id, publish_year, total_copies, available_copies) VALUES
+('978-1111', 'Clean Code',           1, 1, 2008, 5, 5),
+('978-2222', 'Database Systems',     3, 1, 2019, 3, 3),
+('978-3333', 'Pride and Prejudice',  2, 2, 1813, 2, 2),
+('978-4444', 'Modern History',       2, 3, 2015, 4, 4);
+
+INSERT INTO book_authors VALUES (1,3),(2,1),(3,4),(4,2);
+
+INSERT INTO patrons (first_name, last_name, email, phone) VALUES
+('Ali','Khan','ali@mail.com','0300-111'),
+('Sara','Ahmed','sara@mail.com','0300-222'),
+('John','Smith','john@mail.com','0300-333');
+
+INSERT INTO loans (book_id, patron_id, loan_date, due_date) VALUES
+(1,1,'2024-01-01','2024-01-15'),
+(2,2,'2024-01-05','2024-01-19'),
+(3,1,'2024-02-01','2024-02-10');
+
+-- return a book late (triggers fire)
+UPDATE loans SET return_date = '2024-01-20' WHERE loan_id = 1;
+
+-- ---------- SAMPLE QUERIES ----------
+SELECT * FROM v_available_books;
+SELECT * FROM v_overdue_loans;
+
+SELECT p.patron_id, CONCAT(p.first_name,' ',p.last_name) AS patron,
+       COUNT(l.loan_id) AS total_loans
+FROM patrons p LEFT JOIN loans l ON p.patron_id = l.patron_id
+GROUP BY p.patron_id ORDER BY total_loans DESC;
+
+SELECT b.title, COUNT(l.loan_id) AS times_borrowed
+FROM books b LEFT JOIN loans l ON b.book_id = l.book_id
+GROUP BY b.book_id ORDER BY times_borrowed DESC LIMIT 5;
+
+SELECT p.first_name, p.last_name, SUM(f.amount) AS total_fines
+FROM patrons p
+JOIN loans l ON p.patron_id = l.patron_id
+JOIN fines f ON l.loan_id = f.loan_id
+GROUP BY p.patron_id;
